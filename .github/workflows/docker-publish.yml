@@ -25,5 +25,5 @@ jobs:
 
           - name: 'Build Inventory Image'
             run: |
-              docker build . --tag ghcr.io/jumoog/go_caddy_url_updater:latest
-              docker push ghcr.io/jumoog/go_caddy_url_updater:latest
+              docker build . --tag ghcr.io/intro-skipper/go_caddy_url_updater:latest
+              docker push ghcr.io/intro-skipper/go_caddy_url_updater:latest
