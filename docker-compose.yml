@@ -1,0 +1,13 @@
+services:
+  go_caddy_url_updater:
+    image: ghcr.io/jumoog/go_caddy_url_updater:latest
+    container_name: go_caddy_url_updater
+    restart: unless-stopped
+    environment:
+      - AXIOM_TOKEN=${AXIOM_TOKEN}
+      - CADDYFILE_PATH=/etc/caddy/Caddyfile
+      - CADDY_CONTAINER=caddy
+      DOCKER_SOCK: /var/run/docker.sock
+    volumes:
+      - /home/caddy/Caddyfile:/etc/caddy/Caddyfile
+      - /var/run/docker.sock:/var/run/docker.sock
