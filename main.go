@@ -23,6 +23,7 @@ var (
 	caddyFilePath  = getEnv("CADDYFILE_PATH", "/etc/caddy/Caddyfile")
 	caddyContainer = getEnv("CADDY_CONTAINER", "caddy") // container NAME, not ID
 	dockerSock     = getEnv("DOCKER_SOCK", "/var/run/docker.sock")
+	discordWebhook = strings.TrimSpace(getEnv("DISCORD_WEBHOOK_URL", ""))
 )
 
 func getEnv(k, d string) string {
@@ -48,13 +49,29 @@ func main() {
 
 		log.Println("Push received. Commit:", newHash)
 
-		if err := updateCaddyfile(newHash); err != nil {
-			log.Println("Failed to update Caddyfile:", err)
+		repoName := "unknown"
+		if repo := event.GetRepo(); repo != nil {
+			repoName = repo.GetFullName()
+		}
+
+		updateErr := updateCaddyfile(newHash)
+		if updateErr != nil {
+			log.Println("Failed to update Caddyfile:", updateErr)
 		} else {
 			log.Println("Caddyfile updated successfully.")
 		}
-		if err := reloadCaddyInContainer(dockerSock, caddyContainer); err != nil {
-			return err
+
+		reloadErr := reloadCaddyInContainer(dockerSock, caddyContainer)
+		if reloadErr != nil {
+			log.Println("Failed to trigger Caddy reload:", reloadErr)
+		} else {
+			log.Println("Caddy reload triggered successfully.")
+		}
+
+		reportDiscordOutcome(ctx, repoName, newHash, updateErr, reloadErr)
+
+		if reloadErr != nil {
+			return reloadErr
 		}
 		return nil
 	})
@@ -188,4 +205,117 @@ func httpClientForUnixSocket(sockPath string) *http.Client {
 		},
 	}
 	return &http.Client{Transport: tr, Timeout: 10 * time.Second}
+}
+
+func reportDiscordOutcome(ctx context.Context, repoName, commitHash string, updateErr, reloadErr error) {
+	if discordWebhook == "" {
+		return
+	}
+
+	success := updateErr == nil && reloadErr == nil
+
+	embed := discordEmbed{
+		Title:       fmt.Sprintf("Caddy Update • %s", repoName),
+		Description: fmt.Sprintf("Commit `%s` processed.", shortCommit(commitHash)),
+		Color:       embedColor(success),
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Fields: []discordEmbedField{
+			{
+				Name:   "Caddyfile Update",
+				Value:  formatDiscordStatus(updateErr, "Caddyfile updated."),
+				Inline: false,
+			},
+			{
+				Name:   "Caddy Reload",
+				Value:  formatDiscordStatus(reloadErr, "Reload triggered."),
+				Inline: false,
+			},
+		},
+	}
+
+	payload := discordPayload{Embeds: []discordEmbed{embed}}
+
+	if err := sendDiscordMessage(ctx, payload); err != nil {
+		log.Println("Failed to notify Discord:", err)
+	}
+}
+
+func shortCommit(hash string) string {
+	if len(hash) >= 7 {
+		return hash[:7]
+	}
+	return hash
+}
+
+type discordPayload struct {
+	Content string         `json:"content,omitempty"`
+	Embeds  []discordEmbed `json:"embeds,omitempty"`
+}
+
+type discordEmbed struct {
+	Title       string              `json:"title,omitempty"`
+	Description string              `json:"description,omitempty"`
+	Color       int                 `json:"color,omitempty"`
+	Timestamp   string              `json:"timestamp,omitempty"`
+	Fields      []discordEmbedField `json:"fields,omitempty"`
+}
+
+type discordEmbedField struct {
+	Name   string `json:"name,omitempty"`
+	Value  string `json:"value,omitempty"`
+	Inline bool   `json:"inline,omitempty"`
+}
+
+func embedColor(success bool) int {
+	if success {
+		return 0x57F287
+	}
+	return 0xED4245
+}
+
+func formatDiscordStatus(err error, successMsg string) string {
+	if err != nil {
+		return truncateForDiscord(fmt.Sprintf("❌ %v", err), 1000)
+	}
+	return fmt.Sprintf("✅ %s", successMsg)
+}
+
+func truncateForDiscord(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	if limit <= 3 {
+		return s[:limit]
+	}
+	return s[:limit-3] + "..."
+}
+
+func sendDiscordMessage(ctx context.Context, payload discordPayload) error {
+	if discordWebhook == "" {
+		return nil
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal discord payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, discordWebhook, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create discord request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send discord request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("discord webhook returned %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+	}
+
+	return nil
 }

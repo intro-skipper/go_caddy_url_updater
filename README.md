@@ -16,6 +16,7 @@ Small Go service listening for GitHub push webhooks and updating a Caddy configu
 | `CADDY_CONTAINER` | `caddy` | Container name for reload execution |
 | `DOCKER_SOCK` | `/var/run/docker.sock` | Docker socket path used for API calls |
 | `GITHUB_SECRETKEY` | `secret` | Secret for webhook signature verification |
+| `DISCORD_WEBHOOK_URL` | _(empty)_ | Discord webhook endpoint for success and failure notifications |
 
 ## Run
 
