@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/cbrgm/githubevents/v2/githubevents"
-	"github.com/google/go-github/v78/github"
+	"github.com/google/go-github/v79/github"
 )
 
 var (
