@@ -24,6 +24,10 @@ var (
 	caddyContainer = getEnv("CADDY_CONTAINER", "caddy") // container NAME, not ID
 	dockerSock     = getEnv("DOCKER_SOCK", "/var/run/docker.sock")
 	discordWebhook = strings.TrimSpace(getEnv("DISCORD_WEBHOOK_URL", ""))
+	githubOwner    = strings.TrimSpace(getEnv("GITHUB_REPO_OWNER", "intro-skipper"))
+	githubRepo     = strings.TrimSpace(getEnv("GITHUB_REPO_NAME", "manifest"))
+	githubBranch   = strings.TrimSpace(getEnv("GITHUB_REPO_BRANCH", "main"))
+	githubToken    = strings.TrimSpace(getEnv("GITHUB_TOKEN", ""))
 )
 
 func getEnv(k, d string) string {
@@ -34,6 +38,8 @@ func getEnv(k, d string) string {
 }
 
 func main() {
+	checkCommitUpToDate(context.Background())
+
 	handle := githubevents.New(getEnv("GITHUB_SECRETKEY", "secret"))
 
 	handle.OnPushEventAny(func(ctx context.Context, deliveryID string, eventName string, event *github.PushEvent) error {
@@ -318,4 +324,172 @@ func sendDiscordMessage(ctx context.Context, payload discordPayload) error {
 	}
 
 	return nil
+}
+
+func checkCommitUpToDate(ctx context.Context) {
+	hash, err := commitFromCaddyfile(caddyFilePath)
+	if err != nil {
+		log.Println("Commit check skipped:", err)
+		reportDiscordStartup(ctx, "", "", false, err, nil, nil)
+		return
+	}
+
+	if githubOwner == "" || githubRepo == "" || githubBranch == "" {
+		err := errors.New("repository metadata incomplete")
+		log.Println("Commit check skipped:", err)
+		reportDiscordStartup(ctx, hash, "", false, err, nil, nil)
+		return
+	}
+
+	remoteHash, err := fetchRemoteHead(ctx, githubOwner, githubRepo, githubBranch)
+	if err != nil {
+		log.Println("Commit check failed:", err)
+		reportDiscordStartup(ctx, hash, "", false, err, nil, nil)
+		return
+	}
+
+	if strings.EqualFold(remoteHash, hash) {
+		log.Printf("Caddyfile commit %s matches %s/%s@%s", shortCommit(hash), githubOwner, githubRepo, githubBranch)
+		reportDiscordStartup(ctx, hash, remoteHash, false, nil, nil, nil)
+		return
+	}
+
+	log.Printf("Caddyfile commit %s differs from remote head %s (%s/%s@%s) — updating", shortCommit(hash), shortCommit(remoteHash), githubOwner, githubRepo, githubBranch)
+
+	updateErr := updateCaddyfile(remoteHash)
+	if updateErr != nil {
+		log.Println("Startup update failed:", updateErr)
+		reportDiscordStartup(ctx, hash, remoteHash, true, nil, updateErr, nil)
+		return
+	}
+	log.Println("Caddyfile updated to remote head.")
+	hash = remoteHash
+
+	reloadErr := reloadCaddyInContainer(dockerSock, caddyContainer)
+	if reloadErr != nil {
+		log.Println("Startup reload failed:", reloadErr)
+		reportDiscordStartup(ctx, hash, remoteHash, true, nil, nil, reloadErr)
+		return
+	}
+	log.Println("Caddy reload triggered after startup update.")
+	reportDiscordStartup(ctx, hash, remoteHash, true, nil, nil, nil)
+}
+
+func commitFromCaddyfile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read caddyfile: %w", err)
+	}
+
+	// Rely on @<commit> being present in any of the configured upstream paths.
+	re := regexp.MustCompile(`@([a-fA-F0-9]{40})`)
+	match := re.FindStringSubmatch(string(data))
+	if len(match) != 2 {
+		return "", errors.New("no commit hash found in Caddyfile")
+	}
+
+	return strings.ToLower(match[1]), nil
+}
+
+func fetchRemoteHead(ctx context.Context, owner, repo, branch string) (string, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", owner, repo, branch)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "go-caddy-url-updater")
+	if githubToken != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", githubToken))
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return "", fmt.Errorf("github commit lookup returned %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+	}
+
+	var payload struct {
+		SHA string `json:"sha"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", fmt.Errorf("decode github response: %w", err)
+	}
+	if payload.SHA == "" {
+		return "", errors.New("github response missing commit sha")
+	}
+
+	return strings.ToLower(payload.SHA), nil
+}
+
+func reportDiscordStartup(ctx context.Context, localHash, remoteHash string, attempted bool, metaErr, updateErr, reloadErr error) {
+	if discordWebhook == "" {
+		return
+	}
+
+	success := metaErr == nil && updateErr == nil && reloadErr == nil
+
+	embed := discordEmbed{
+		Title:     "Startup Sync",
+		Color:     embedColor(success),
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	switch {
+	case metaErr != nil:
+		embed.Description = fmt.Sprintf("Commit alignment failed: %v", metaErr)
+	case !attempted:
+		embed.Description = "Caddyfile already matches GitHub head."
+	case updateErr != nil:
+		embed.Description = "Failed updating Caddyfile to match GitHub head."
+	case reloadErr != nil:
+		embed.Description = "Caddyfile updated but Caddy reload failed."
+	default:
+		embed.Description = "Caddyfile synchronized with GitHub head."
+	}
+
+	if localHash != "" {
+		embed.Fields = append(embed.Fields, discordEmbedField{
+			Name:   "Caddyfile Hash",
+			Value:  fmt.Sprintf("`%s`", shortCommit(localHash)),
+			Inline: true,
+		})
+	}
+	if remoteHash != "" {
+		embed.Fields = append(embed.Fields, discordEmbedField{
+			Name:   "GitHub Head",
+			Value:  fmt.Sprintf("`%s`", shortCommit(remoteHash)),
+			Inline: true,
+		})
+	}
+
+	if attempted {
+		embed.Fields = append(embed.Fields, discordEmbedField{
+			Name:   "Update",
+			Value:  formatDiscordStatus(updateErr, "Caddyfile synchronized."),
+			Inline: false,
+		})
+		if updateErr == nil {
+			embed.Fields = append(embed.Fields, discordEmbedField{
+				Name:   "Reload",
+				Value:  formatDiscordStatus(reloadErr, "Caddy reloaded."),
+				Inline: false,
+			})
+		}
+	}
+
+	payload := discordPayload{Embeds: []discordEmbed{embed}}
+
+	if err := sendDiscordMessage(ctx, payload); err != nil {
+		log.Println("Failed to notify Discord:", err)
+	}
 }

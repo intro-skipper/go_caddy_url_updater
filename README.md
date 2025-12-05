@@ -1,6 +1,6 @@
 # go_caddy_url_updater
 
-Small Go service listening for GitHub push webhooks and updating a Caddy configuration before triggering a reload. Core logic resides in [main.go](main.go) via [`main.updateCaddyfile`](main.go) and [`main.reloadCaddyInContainer`](main.go).
+Small Go service listening for GitHub push webhooks and updating a Caddy configuration before triggering a reload. On startup it also checks the configured branch on GitHub and, if the local Caddyfile hash lags behind, performs the update and reload automatically. Core logic resides in [main.go](main.go) via [`main.updateCaddyfile`](main.go) and [`main.reloadCaddyInContainer`](main.go).
 
 ## Prerequisites
 
@@ -17,6 +17,10 @@ Small Go service listening for GitHub push webhooks and updating a Caddy configu
 | `DOCKER_SOCK` | `/var/run/docker.sock` | Docker socket path used for API calls |
 | `GITHUB_SECRETKEY` | `secret` | Secret for webhook signature verification |
 | `DISCORD_WEBHOOK_URL` | _(empty)_ | Discord webhook endpoint for success and failure notifications |
+| `GITHUB_REPO_OWNER` | `intro-skipper` | Owner used when checking the deployed binary against GitHub |
+| `GITHUB_REPO_NAME` | `manifest` | Repository name used for commit verification |
+| `GITHUB_REPO_BRANCH` | `main` | Branch considered the canonical reference for commit verification |
+| `GITHUB_TOKEN` | _(empty)_ | Optional token for GitHub commit lookups (avoids low rate limits) |
 
 ## Run
 
