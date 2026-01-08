@@ -11,12 +11,13 @@ Small Go service listening for GitHub push webhooks and updating a Caddy configu
 ## Configuration
 
 | Variable | Default | Purpose |
-|----------|---------|---------|
+| --- | --- | --- |
 | `CADDYFILE_PATH` | `/etc/caddy/Caddyfile` | Path to the Caddyfile inside the container |
 | `CADDY_CONTAINER` | `caddy` | Container name for reload execution |
 | `DOCKER_SOCK` | `/var/run/docker.sock` | Docker socket path used for API calls |
 | `GITHUB_SECRETKEY` | `secret` | Secret for webhook signature verification |
 | `DISCORD_WEBHOOK_URL` | _(empty)_ | Discord webhook endpoint for success and failure notifications |
+| `LOCATION` | _(empty)_ | Optional server location label included in Discord messages |
 | `GITHUB_REPO_OWNER` | `intro-skipper` | Owner used when checking the deployed binary against GitHub |
 | `GITHUB_REPO_NAME` | `manifest` | Repository name used for commit verification |
 | `GITHUB_REPO_BRANCH` | `main` | Branch considered the canonical reference for commit verification |

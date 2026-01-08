@@ -24,6 +24,7 @@ var (
 	caddyContainer = getEnv("CADDY_CONTAINER", "caddy") // container NAME, not ID
 	dockerSock     = getEnv("DOCKER_SOCK", "/var/run/docker.sock")
 	discordWebhook = strings.TrimSpace(getEnv("DISCORD_WEBHOOK_URL", ""))
+	location       = strings.TrimSpace(getEnv("LOCATION", ""))
 	githubOwner    = strings.TrimSpace(getEnv("GITHUB_REPO_OWNER", "intro-skipper"))
 	githubRepo     = strings.TrimSpace(getEnv("GITHUB_REPO_NAME", "manifest"))
 	githubBranch   = strings.TrimSpace(getEnv("GITHUB_REPO_BRANCH", "main"))
@@ -225,19 +226,21 @@ func reportDiscordOutcome(ctx context.Context, repoName, commitHash string, upda
 		Description: fmt.Sprintf("Commit `%s` processed.", shortCommit(commitHash)),
 		Color:       embedColor(success),
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
-		Fields: []discordEmbedField{
-			{
-				Name:   "Caddyfile Update",
-				Value:  formatDiscordStatus(updateErr, "Caddyfile updated."),
-				Inline: false,
-			},
-			{
-				Name:   "Caddy Reload",
-				Value:  formatDiscordStatus(reloadErr, "Reload triggered."),
-				Inline: false,
-			},
-		},
 	}
+
+	embed.Fields = appendLocationField(embed.Fields)
+	embed.Fields = append(embed.Fields,
+		discordEmbedField{
+			Name:   "Caddyfile Update",
+			Value:  formatDiscordStatus(updateErr, "Caddyfile updated."),
+			Inline: false,
+		},
+		discordEmbedField{
+			Name:   "Caddy Reload",
+			Value:  formatDiscordStatus(reloadErr, "Reload triggered."),
+			Inline: false,
+		},
+	)
 
 	payload := discordPayload{Embeds: []discordEmbed{embed}}
 
@@ -444,6 +447,8 @@ func reportDiscordStartup(ctx context.Context, localHash, remoteHash string, att
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
 
+	embed.Fields = appendLocationField(embed.Fields)
+
 	switch {
 	case metaErr != nil:
 		embed.Description = fmt.Sprintf("Commit alignment failed: %v", metaErr)
@@ -492,4 +497,15 @@ func reportDiscordStartup(ctx context.Context, localHash, remoteHash string, att
 	if err := sendDiscordMessage(ctx, payload); err != nil {
 		log.Println("Failed to notify Discord:", err)
 	}
+}
+
+func appendLocationField(fields []discordEmbedField) []discordEmbedField {
+	if location == "" {
+		return fields
+	}
+	return append(fields, discordEmbedField{
+		Name:   "Location",
+		Value:  truncateForDiscord(location, 256),
+		Inline: true,
+	})
 }
