@@ -105,17 +105,11 @@ func updateCaddyfile(newHash string) error {
 
 	content := string(data)
 
-	// Pattern 1: fixed version number, e.g.
-	// @<hash>/10.11/manifest.json
-	re1 := regexp.MustCompile(`(@)[a-fA-F0-9]{40}(/10\.11/manifest\.json)`)
+	// Pattern: commit_hash variable in vars block, e.g.
+	// commit_hash "d340f16ba1256ec563d7b08c0396645d555e65b8"
+	re := regexp.MustCompile(`(commit_hash\s+")[a-fA-F0-9]{40}(")`)
 
-	// Pattern 2: Caddy placeholder version, e.g.
-	// @<hash>/{http.regexp.VER.1}/manifest.json
-	re2 := regexp.MustCompile(`(@)[a-fA-F0-9]{40}(/\{http\.regexp\.VER\.1\}/manifest\.json)`)
-
-	// Apply replacements
-	updated := re1.ReplaceAllString(content, fmt.Sprintf("@%s$2", newHash))
-	updated = re2.ReplaceAllString(updated, fmt.Sprintf("@%s$2", newHash))
+	updated := re.ReplaceAllString(content, fmt.Sprintf("${1}%s${2}", newHash))
 
 	return os.WriteFile(caddyFilePath, []byte(updated), 0644)
 }
@@ -384,8 +378,8 @@ func commitFromCaddyfile(path string) (string, error) {
 		return "", fmt.Errorf("read caddyfile: %w", err)
 	}
 
-	// Rely on @<commit> being present in any of the configured upstream paths.
-	re := regexp.MustCompile(`@([a-fA-F0-9]{40})`)
+	// Extract commit hash from the commit_hash variable in vars block.
+	re := regexp.MustCompile(`commit_hash\s+"([a-fA-F0-9]{40})"`)
 	match := re.FindStringSubmatch(string(data))
 	if len(match) != 2 {
 		return "", errors.New("no commit hash found in Caddyfile")
