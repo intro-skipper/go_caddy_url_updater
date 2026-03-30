@@ -29,6 +29,9 @@ var (
 	githubRepo     = strings.TrimSpace(getEnv("GITHUB_REPO_NAME", "manifest"))
 	githubBranch   = strings.TrimSpace(getEnv("GITHUB_REPO_BRANCH", "main"))
 	githubToken    = strings.TrimSpace(getEnv("GITHUB_TOKEN", ""))
+
+	commitHashRe = regexp.MustCompile(`(commit_hash\s+")[a-fA-F0-9]{40}(")`)
+	commitExtractRe = regexp.MustCompile(`commit_hash\s+"([a-fA-F0-9]{40})"`)
 )
 
 func getEnv(k, d string) string {
@@ -83,15 +86,13 @@ func main() {
 		return nil
 	})
 
-	// add a http handleFunc
 	http.HandleFunc("/hook", func(w http.ResponseWriter, r *http.Request) {
-		err := handle.HandleEventRequest(r)
-		if err != nil {
-			fmt.Println("error")
+		if err := handle.HandleEventRequest(r); err != nil {
+			log.Println("webhook error:", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
 		}
 	})
 
-	// start the server listening on port 8080
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		panic(err)
 	}
@@ -107,9 +108,7 @@ func updateCaddyfile(newHash string) error {
 
 	// Pattern: commit_hash variable in vars block, e.g.
 	// commit_hash "d340f16ba1256ec563d7b08c0396645d555e65b8"
-	re := regexp.MustCompile(`(commit_hash\s+")[a-fA-F0-9]{40}(")`)
-
-	updated := re.ReplaceAllString(content, fmt.Sprintf("${1}%s${2}", newHash))
+	updated := commitHashRe.ReplaceAllString(content, fmt.Sprintf("${1}%s${2}", newHash))
 
 	return os.WriteFile(caddyFilePath, []byte(updated), 0644)
 }
@@ -379,8 +378,7 @@ func commitFromCaddyfile(path string) (string, error) {
 	}
 
 	// Extract commit hash from the commit_hash variable in vars block.
-	re := regexp.MustCompile(`commit_hash\s+"([a-fA-F0-9]{40})"`)
-	match := re.FindStringSubmatch(string(data))
+	match := commitExtractRe.FindStringSubmatch(string(data))
 	if len(match) != 2 {
 		return "", errors.New("no commit hash found in Caddyfile")
 	}
