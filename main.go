@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/cbrgm/githubevents/v2/githubevents"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v85/github"
 )
 
 var (
@@ -30,7 +30,7 @@ var (
 	githubBranch   = strings.TrimSpace(getEnv("GITHUB_REPO_BRANCH", "main"))
 	githubToken    = strings.TrimSpace(getEnv("GITHUB_TOKEN", ""))
 
-	commitHashRe = regexp.MustCompile(`(commit_hash\s+")[a-fA-F0-9]{40}(")`)
+	commitHashRe    = regexp.MustCompile(`(commit_hash\s+")[a-fA-F0-9]{40}(")`)
 	commitExtractRe = regexp.MustCompile(`commit_hash\s+"([a-fA-F0-9]{40})"`)
 )
 
