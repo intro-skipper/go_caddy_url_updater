@@ -16,7 +16,8 @@ import (
 	"time"
 
 	"github.com/cbrgm/githubevents/v2/githubevents"
-	"github.com/google/go-github/v85/github"
+
+	"intro-skipper/go_caddy_url_updater/internal/githubcompat"
 )
 
 var (
@@ -46,7 +47,7 @@ func main() {
 
 	handle := githubevents.New(getEnv("GITHUB_SECRETKEY", "secret"))
 
-	handle.OnPushEventAny(func(ctx context.Context, deliveryID string, eventName string, event *github.PushEvent) error {
+	handle.OnPushEventAny(func(ctx context.Context, deliveryID string, eventName string, event *githubcompat.PushEvent) error {
 		newHash := event.GetAfter()
 
 		ref := event.GetRef()
