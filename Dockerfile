@@ -2,9 +2,11 @@ FROM golang:1.26.2 AS builder
 
 WORKDIR /go/src/github.com/intro-skipper/go_caddy_url_updater
 
-COPY . .
+COPY go.mod go.sum ./
 
-RUN go get .
+RUN go mod download
+
+COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o app .
 
