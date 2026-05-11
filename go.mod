@@ -3,8 +3,8 @@ module intro-skipper/go_caddy_url_updater
 go 1.26
 
 require (
-	github.com/cbrgm/githubevents/v2 v2.16.0
-	github.com/google/go-github/v85 v85.0.0
+	github.com/cbrgm/githubevents/v2 v2.17.0
+	github.com/google/go-github/v86 v86.0.0
 )
 
 require (
