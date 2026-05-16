@@ -30,3 +30,7 @@ go run ./...
 ```
 
 The HTTP server exposes `/hook` on port 8080 and expects GitHub `push` events.
+
+## License
+
+Apache-2.0. This matches the strongest license requirement among the direct dependencies while remaining compatible with the BSD-3-Clause transitive dependencies.
