@@ -14,14 +14,14 @@ Use this skill when Dependabot opens a PR bumping `github.com/cbrgm/githubevents
 ## Steps
 
 1. Inspect the updated `github.com/cbrgm/githubevents/v2` module to find which `github.com/google/go-github/vNN/github` import path it now uses. Check both its `go.mod` and the callback signatures that this repo uses, especially `OnPushEventAny`.
-2. Treat that discovered `vNN` as authoritative. The PR is incomplete until every repository reference to the versioned go-github module uses that same major version.
+2. Treat that discovered `vNN` as authoritative. The PR is incomplete until every code and module-file reference to the versioned go-github module uses that same major version.
 3. Ensure `go.mod` directly requires the authoritative `github.com/google/go-github/vNN` major version. If Dependabot left the new version as `// indirect` while the old version is still direct, promote the new version to direct and remove the old direct requirement.
 4. Run `go mod tidy` so unused old `github.com/google/go-github/vMM` entries are removed from `go.mod` and `go.sum`.
 5. Update `internal/githubcompat/githubcompat.go` so its import path matches the authoritative `vNN`. This is mandatory, not optional; a dependency-only diff is wrong if this file still imports the previous go-github major version.
 6. Keep `githubcompat.PushEvent` defined as a type alias (`type PushEvent = github.PushEvent`) so it stays identity-equivalent to the upstream type and works as a `*github.PushEvent` callback parameter without conversion.
 7. Do not change `main.go` unless the githubevents callback API itself changed. `main.go` should only reference `*githubcompat.PushEvent`.
-8. Verify there is exactly one versioned go-github major referenced by repo code and module files:
-   - `grep -R "github.com/google/go-github" -n . --exclude-dir=.git`
+8. Verify there is exactly one versioned go-github major referenced by repo code and module files. Do not scan `.agents`, because that matches this skill's instructional examples rather than application dependencies:
+   - `grep -R "github.com/google/go-github/v" -n --include='*.go' --include='go.mod' --include='go.sum' . --exclude-dir=.git --exclude-dir=.agents`
    - `go build ./...`
    - `go vet ./...`
    - `gofmt -l .`
