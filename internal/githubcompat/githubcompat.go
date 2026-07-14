@@ -1,5 +1,5 @@
 package githubcompat
 
-import github "github.com/google/go-github/v88/github"
+import github "github.com/google/go-github/v89/github"
 
 type PushEvent = github.PushEvent
