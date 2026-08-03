@@ -1,5 +1,5 @@
-github.com/cbrgm/githubevents/v2 v2.19.0 h1:A8+jZOWuiBOOZoRu4XmGWMtz4tFWSgnLf23UudOuplI=
-github.com/cbrgm/githubevents/v2 v2.19.0/go.mod h1:ZRcZavbwm5mX8XCBqJnOIl+l59W5AxgTHVPdqMr1Gck=
+github.com/cbrgm/githubevents/v2 v2.19.1 h1:yx50fHUyNCVq3WdT/eIDDehJFIsBtvGEKB9Md/8hBCg=
+github.com/cbrgm/githubevents/v2 v2.19.1/go.mod h1:ZRcZavbwm5mX8XCBqJnOIl+l59W5AxgTHVPdqMr1Gck=
 github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
