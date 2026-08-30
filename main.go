@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,13 +14,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
-
-	"github.com/cbrgm/githubevents/v2/githubevents"
-
-	"intro-skipper/go_caddy_url_updater/internal/githubcompat"
+	"unicode/utf8"
 )
 
 var (
@@ -33,6 +35,15 @@ var (
 
 	commitHashRe    = regexp.MustCompile(`(commit_hash\s+")[a-fA-F0-9]{40}(")`)
 	commitExtractRe = regexp.MustCompile(`commit_hash\s+"([a-fA-F0-9]{40})"`)
+	commitSHARe     = regexp.MustCompile(`^[a-fA-F0-9]{40}$`)
+
+	// nullCommit is what GitHub sends as "after" when a branch is deleted.
+	nullCommit = strings.Repeat("0", 40)
+
+	// caddyMu serializes the Caddyfile read-modify-write and the reload that
+	// follows it: net/http serves one goroutine per delivery, so two pushes
+	// arriving together would otherwise interleave.
+	caddyMu sync.Mutex
 )
 
 func getEnv(k, d string) string {
@@ -43,63 +54,199 @@ func getEnv(k, d string) string {
 }
 
 func main() {
+	webhookSecret := strings.TrimSpace(os.Getenv("GITHUB_SECRETKEY"))
+	if webhookSecret == "" {
+		log.Fatal("GITHUB_SECRETKEY is required: refusing to start without a webhook secret")
+	}
+
 	checkCommitUpToDate(context.Background())
 
-	handle := githubevents.New(getEnv("GITHUB_SECRETKEY", "secret"))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/hook", webhookHandler(webhookSecret))
 
-	handle.OnPushEventAny(func(ctx context.Context, deliveryID string, eventName string, event *githubcompat.PushEvent) error {
-		newHash := event.GetAfter()
+	srv := &http.Server{
+		Addr:              ":8080",
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       60 * time.Second,
+	}
 
-		ref := event.GetRef()
-
-		// Only act on pushes to main branch
-		if !strings.EqualFold(ref, "refs/heads/main") {
-			log.Println("Push event is not for main branch. Ref:", ref)
-			return nil
-		}
-
-		log.Println("Push received. Commit:", newHash)
-
-		repoName := "unknown"
-		if repo := event.GetRepo(); repo != nil {
-			repoName = repo.GetFullName()
-		}
-
-		updateErr := updateCaddyfile(newHash)
-		if updateErr != nil {
-			log.Println("Failed to update Caddyfile:", updateErr)
-		} else {
-			log.Println("Caddyfile updated successfully.")
-		}
-
-		reloadErr := reloadCaddyInContainer(dockerSock, caddyContainer)
-		if reloadErr != nil {
-			log.Println("Failed to trigger Caddy reload:", reloadErr)
-		} else {
-			log.Println("Caddy reload triggered successfully.")
-		}
-
-		reportDiscordOutcome(ctx, repoName, newHash, updateErr, reloadErr)
-
-		if reloadErr != nil {
-			return reloadErr
-		}
-		return nil
-	})
-
-	http.HandleFunc("/hook", func(w http.ResponseWriter, r *http.Request) {
-		if err := handle.HandleEventRequest(r); err != nil {
-			log.Println("webhook error:", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-		}
-	})
-
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		panic(err)
 	}
 }
 
+// pushEvent is the subset of GitHub's push payload this service needs. Keeping
+// our own struct means no dependency on a go-github major version, which the
+// upstream webhook libraries change on every release.
+type pushEvent struct {
+	Ref        string `json:"ref"`
+	After      string `json:"after"`
+	Deleted    bool   `json:"deleted"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+// maxWebhookBody caps the request body: GitHub does not deliver payloads larger
+// than 25 MB.
+const maxWebhookBody = 25 << 20
+
+func webhookHandler(secret string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBody))
+		if err != nil {
+			log.Println("webhook: read body:", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+
+		if err := verifySignature(secret, body, r.Header.Get("X-Hub-Signature-256")); err != nil {
+			log.Println("webhook: rejected delivery:", err)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		deliveryID := r.Header.Get("X-GitHub-Delivery")
+		if eventName := r.Header.Get("X-GitHub-Event"); eventName != "push" {
+			log.Printf("webhook: ignoring %q event. Delivery: %s", eventName, deliveryID)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		var event pushEvent
+		if err := json.Unmarshal(body, &event); err != nil {
+			log.Println("webhook: decode push payload:", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+
+		if err := handlePush(r.Context(), event); err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// verifySignature checks the HMAC GitHub sends with every delivery. The
+// comparison is constant time so it cannot be probed byte by byte.
+func verifySignature(secret string, body []byte, header string) error {
+	const prefix = "sha256="
+
+	if !strings.HasPrefix(header, prefix) {
+		return errors.New("missing or malformed X-Hub-Signature-256 header")
+	}
+
+	want, err := hex.DecodeString(strings.TrimPrefix(header, prefix))
+	if err != nil {
+		return errors.New("signature is not valid hex")
+	}
+
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	if !hmac.Equal(want, mac.Sum(nil)) {
+		return errors.New("signature mismatch")
+	}
+
+	return nil
+}
+
+func handlePush(ctx context.Context, event pushEvent) error {
+	// Only act on pushes to main branch
+	if !strings.EqualFold(event.Ref, "refs/heads/main") {
+		log.Println("Push event is not for main branch. Ref:", event.Ref)
+		return nil
+	}
+
+	if event.Deleted {
+		log.Println("Push event deletes the branch. Ignoring. Ref:", event.Ref)
+		return nil
+	}
+
+	newHash := event.After
+	if err := validateCommitHash(newHash); err != nil {
+		log.Println("Ignoring push event:", err)
+		return nil
+	}
+
+	log.Println("Push received. Commit:", newHash)
+
+	repoName := event.Repository.FullName
+	if repoName == "" {
+		repoName = "unknown"
+	}
+
+	updateErr, reloadErr := applyCommit(newHash)
+	if updateErr != nil {
+		log.Println("Failed to update Caddyfile:", updateErr)
+	} else {
+		log.Println("Caddyfile updated successfully.")
+	}
+	if reloadErr != nil {
+		log.Println("Failed to reload Caddy:", reloadErr)
+	} else {
+		log.Println("Caddy reloaded successfully.")
+	}
+
+	reportDiscordOutcome(ctx, repoName, newHash, updateErr, reloadErr)
+
+	return reloadErr
+}
+
+// validateCommitHash rejects anything that is not a real commit id before it
+// reaches the Caddyfile: an empty or malformed "after" field, and the null
+// commit GitHub sends for branch deletions.
+func validateCommitHash(hash string) error {
+	if !commitSHARe.MatchString(hash) {
+		return fmt.Errorf("not a commit hash: %q", truncateForDiscord(hash, 64))
+	}
+	if strings.EqualFold(hash, nullCommit) {
+		return errors.New("refusing to write the null commit hash")
+	}
+	return nil
+}
+
+// applyCommit rewrites the Caddyfile and reloads Caddy under caddyMu. The
+// reload runs even when the rewrite failed, so a Caddyfile edited by hand still
+// takes effect.
+func applyCommit(newHash string) (updateErr, reloadErr error) {
+	caddyMu.Lock()
+	defer caddyMu.Unlock()
+
+	updateErr = updateCaddyfile(newHash)
+	reloadErr = reloadCaddyInContainer(dockerSock, caddyContainer)
+	return updateErr, reloadErr
+}
+
+// syncToRemoteHead is the startup variant of applyCommit: it skips the reload
+// when the Caddyfile could not be updated.
+func syncToRemoteHead(remoteHash string) (updateErr, reloadErr error) {
+	caddyMu.Lock()
+	defer caddyMu.Unlock()
+
+	if err := updateCaddyfile(remoteHash); err != nil {
+		return err, nil
+	}
+	log.Println("Caddyfile updated to remote head.")
+
+	return nil, reloadCaddyInContainer(dockerSock, caddyContainer)
+}
+
 func updateCaddyfile(newHash string) error {
+	if err := validateCommitHash(newHash); err != nil {
+		return err
+	}
+
 	data, err := os.ReadFile(caddyFilePath)
 	if err != nil {
 		return err
@@ -109,9 +256,60 @@ func updateCaddyfile(newHash string) error {
 
 	// Pattern: commit_hash variable in vars block, e.g.
 	// commit_hash "d340f16ba1256ec563d7b08c0396645d555e65b8"
-	updated := commitHashRe.ReplaceAllString(content, fmt.Sprintf("${1}%s${2}", newHash))
+	if !commitHashRe.MatchString(content) {
+		return fmt.Errorf("no commit_hash entry found in %s", caddyFilePath)
+	}
 
-	return os.WriteFile(caddyFilePath, []byte(updated), 0644)
+	// newHash is 40 hex digits (validated above), so it cannot be mistaken for
+	// an expansion reference in the replacement template.
+	updated := commitHashRe.ReplaceAllString(content, fmt.Sprintf("${1}%s${2}", newHash))
+	if updated == content {
+		// Already at newHash.
+		return nil
+	}
+
+	return writeFileAtomic(caddyFilePath, []byte(updated))
+}
+
+// writeFileAtomic replaces path with a rename so an interrupted write can never
+// leave Caddy with a truncated config. A single-file bind mount cannot be
+// replaced that way, so that case falls back to an in-place write.
+func writeFileAtomic(path string, data []byte) error {
+	perm := os.FileMode(0644)
+	if fi, err := os.Stat(path); err == nil {
+		perm = fi.Mode().Perm()
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename succeeded
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		// Mounting the directory instead of the file makes this path atomic.
+		log.Printf("Atomic replace of %s failed (%v); writing in place", path, err)
+		return os.WriteFile(path, data, perm)
+	}
+
+	return nil
 }
 
 func reloadCaddyInContainer(sockPath, containerName string) error {
@@ -196,7 +394,52 @@ func reloadCaddyInContainer(sockPath, containerName string) error {
 		return fmt.Errorf("docker start exec failed: %s", string(b))
 	}
 
-	return nil
+	return waitForExec(client, createResp.ID)
+}
+
+// waitForExec blocks until the exec finished, so a failing "caddy reload" (an
+// invalid Caddyfile, for example) is reported instead of counted as a success.
+func waitForExec(client *http.Client, execID string) error {
+	deadline := time.Now().Add(30 * time.Second)
+
+	for {
+		running, exitCode, err := inspectExec(client, execID)
+		if err != nil {
+			return err
+		}
+		if !running {
+			if exitCode != 0 {
+				return fmt.Errorf("caddy reload exited with code %d", exitCode)
+			}
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errors.New("timed out waiting for caddy reload to finish")
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func inspectExec(client *http.Client, execID string) (running bool, exitCode int, err error) {
+	resp, err := client.Get(fmt.Sprintf("http://unix/exec/%s/json", execID))
+	if err != nil {
+		return false, 0, fmt.Errorf("docker inspect exec: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return false, 0, fmt.Errorf("docker inspect exec failed: %s", strings.TrimSpace(string(b)))
+	}
+
+	var state struct {
+		Running  bool `json:"Running"`
+		ExitCode int  `json:"ExitCode"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+		return false, 0, fmt.Errorf("decode inspect exec resp: %w", err)
+	}
+
+	return state.Running, state.ExitCode, nil
 }
 
 func httpClientForUnixSocket(sockPath string) *http.Client {
@@ -231,7 +474,7 @@ func reportDiscordOutcome(ctx context.Context, repoName, commitHash string, upda
 		},
 		discordEmbedField{
 			Name:   "Caddy Reload",
-			Value:  formatDiscordStatus(reloadErr, "Reload triggered."),
+			Value:  formatDiscordStatus(reloadErr, "Caddy reloaded."),
 			Inline: false,
 		},
 	)
@@ -283,14 +526,21 @@ func formatDiscordStatus(err error, successMsg string) string {
 	return fmt.Sprintf("✅ %s", successMsg)
 }
 
+// truncateForDiscord shortens s to limit characters. Discord counts characters,
+// and cutting bytes would split a multi-byte rune in half.
 func truncateForDiscord(s string, limit int) string {
-	if len(s) <= limit {
+	if limit <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= limit {
 		return s
 	}
+
+	runes := []rune(s)
 	if limit <= 3 {
-		return s[:limit]
+		return string(runes[:limit])
 	}
-	return s[:limit-3] + "..."
+	return string(runes[:limit-3]) + "..."
 }
 
 func sendDiscordMessage(ctx context.Context, payload discordPayload) error {
@@ -303,7 +553,12 @@ func sendDiscordMessage(ctx context.Context, payload discordPayload) error {
 		return fmt.Errorf("marshal discord payload: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, discordWebhook, bytes.NewReader(body))
+	// The webhook request context is cancelled as soon as GitHub gives up on the
+	// delivery, which is precisely when the failure notification matters most.
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(sendCtx, http.MethodPost, discordWebhook, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create discord request: %w", err)
 	}
@@ -353,22 +608,21 @@ func checkCommitUpToDate(ctx context.Context) {
 
 	log.Printf("Caddyfile commit %s differs from remote head %s (%s/%s@%s) — updating", shortCommit(hash), shortCommit(remoteHash), githubOwner, githubRepo, githubBranch)
 
-	updateErr := updateCaddyfile(remoteHash)
+	updateErr, reloadErr := syncToRemoteHead(remoteHash)
 	if updateErr != nil {
 		log.Println("Startup update failed:", updateErr)
 		reportDiscordStartup(ctx, hash, remoteHash, true, nil, updateErr, nil)
 		return
 	}
-	log.Println("Caddyfile updated to remote head.")
 	hash = remoteHash
 
-	reloadErr := reloadCaddyInContainer(dockerSock, caddyContainer)
 	if reloadErr != nil {
 		log.Println("Startup reload failed:", reloadErr)
 		reportDiscordStartup(ctx, hash, remoteHash, true, nil, nil, reloadErr)
 		return
 	}
-	log.Println("Caddy reload triggered after startup update.")
+
+	log.Println("Caddy reloaded after startup update.")
 	reportDiscordStartup(ctx, hash, remoteHash, true, nil, nil, nil)
 }
 
@@ -420,8 +674,8 @@ func fetchRemoteHead(ctx context.Context, owner, repo, branch string) (string, e
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return "", fmt.Errorf("decode github response: %w", err)
 	}
-	if payload.SHA == "" {
-		return "", errors.New("github response missing commit sha")
+	if err := validateCommitHash(payload.SHA); err != nil {
+		return "", fmt.Errorf("github response: %w", err)
 	}
 
 	return strings.ToLower(payload.SHA), nil

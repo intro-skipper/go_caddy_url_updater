@@ -4,9 +4,12 @@ Small Go service listening for GitHub push webhooks and updating a Caddy configu
 
 ## Prerequisites
 
-- Go 1.25 or newer
+- Go 1.26 or newer
 - Docker socket access (default `$ /var/run/docker.sock $`)
 - Running Caddy container
+
+The service depends only on the Go standard library. Webhook deliveries are
+authenticated in-process against `X-Hub-Signature-256`.
 
 ## Configuration
 
@@ -15,7 +18,7 @@ Small Go service listening for GitHub push webhooks and updating a Caddy configu
 | `CADDYFILE_PATH` | `/etc/caddy/Caddyfile` | Path to the Caddyfile inside the container |
 | `CADDY_CONTAINER` | `caddy` | Container name for reload execution |
 | `DOCKER_SOCK` | `/var/run/docker.sock` | Docker socket path used for API calls |
-| `GITHUB_SECRETKEY` | `secret` | Secret for webhook signature verification |
+| `GITHUB_SECRETKEY` | _(required)_ | Secret for webhook signature verification; the service refuses to start without it |
 | `DISCORD_WEBHOOK_URL` | _(empty)_ | Discord webhook endpoint for success and failure notifications |
 | `LOCATION` | _(empty)_ | Optional server location label included in Discord messages |
 | `GITHUB_REPO_OWNER` | `intro-skipper` | Owner used when checking the deployed binary against GitHub |
@@ -33,4 +36,4 @@ The HTTP server exposes `/hook` on port 8080 and expects GitHub `push` events.
 
 ## License
 
-Apache-2.0. This matches the strongest license requirement among the direct dependencies while remaining compatible with the BSD-3-Clause transitive dependencies.
+Apache-2.0. The service has no third-party dependencies.
