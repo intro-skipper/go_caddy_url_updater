@@ -200,7 +200,9 @@ func handlePush(ctx context.Context, event pushEvent) error {
 
 	reportDiscordOutcome(ctx, repoName, newHash, updateErr, reloadErr)
 
-	return reloadErr
+	// Both failures have to reach the response: a rewrite that failed while the
+	// reload succeeded would otherwise show up as a successful delivery.
+	return errors.Join(updateErr, reloadErr)
 }
 
 // validateCommitHash rejects anything that is not a real commit id before it
