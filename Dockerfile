@@ -1,4 +1,4 @@
-FROM golang:1.26.7 AS builder
+FROM golang:1.26.8 AS builder
 
 WORKDIR /go/src/github.com/intro-skipper/go_caddy_url_updater
 
