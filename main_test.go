@@ -123,3 +123,61 @@ func TestWebhookHandler(t *testing.T) {
 		}
 	})
 }
+
+func TestCommitURL(t *testing.T) {
+	const hash = "d340f16ba1256ec563d7b08c0396645d555e65b8"
+
+	tests := []struct {
+		name, repoURL, hash, want string
+	}{
+		{"github", "https://github.com/intro-skipper/manifest", hash, "https://github.com/intro-skipper/manifest/commit/" + hash},
+		{"trailing slash", "https://github.com/intro-skipper/manifest/", hash, "https://github.com/intro-skipper/manifest/commit/" + hash},
+		{"missing url", "", hash, ""},
+		{"enterprise host", "https://git.example.com/org/repo", hash, "https://git.example.com/org/repo/commit/" + hash},
+		{"non-https url", "javascript:alert(1)", hash, ""},
+		{"http url", "http://github.com/intro-skipper/manifest", hash, ""},
+		{"no host", "https:///intro-skipper/manifest", hash, ""},
+		{"userinfo", "https://user:pw@github.com/intro-skipper/manifest", hash, ""},
+		{"query", "https://github.com/intro-skipper/manifest?x=1", hash, ""},
+		{"fragment", "https://github.com/intro-skipper/manifest#x", hash, ""},
+		{"closing paren", "https://evil.example/x)", hash, ""},
+		{"markdown break", "https://evil.example/x](https://other", hash, ""},
+		{"whitespace", "https://evil.example/x y", hash, ""},
+		{"control char", "https://evil.example/x\n", hash, ""},
+		{"bad hash", "https://github.com/intro-skipper/manifest", "not-a-hash", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := commitURL(tc.repoURL, tc.hash); got != tc.want {
+				t.Fatalf("commitURL(%q, %q) = %q, want %q", tc.repoURL, tc.hash, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatCommitRef(t *testing.T) {
+	const hash = "d340f16ba1256ec563d7b08c0396645d555e65b8"
+
+	if got, want := formatCommitRef(hash, ""), "`d340f16`"; got != want {
+		t.Fatalf("formatCommitRef without link = %q, want %q", got, want)
+	}
+	link := "https://github.com/intro-skipper/manifest/commit/" + hash
+	if got, want := formatCommitRef(hash, link), "[`d340f16`]("+link+")"; got != want {
+		t.Fatalf("formatCommitRef with link = %q, want %q", got, want)
+	}
+}
+
+func TestGithubRepoURL(t *testing.T) {
+	if got, want := githubRepoURL("intro-skipper", "manifest"), "https://github.com/intro-skipper/manifest"; got != want {
+		t.Fatalf("githubRepoURL = %q, want %q", got, want)
+	}
+	if got := githubRepoURL("", "manifest"); got != "" {
+		t.Fatalf("githubRepoURL without owner = %q, want empty", got)
+	}
+	if got := githubRepoURL("intro-skipper", ""); got != "" {
+		t.Fatalf("githubRepoURL without repo = %q, want empty", got)
+	}
+	if got, want := githubRepoURL("a/b", "c d"), "https://github.com/a%2Fb/c%20d"; got != want {
+		t.Fatalf("githubRepoURL escaping = %q, want %q", got, want)
+	}
+}
