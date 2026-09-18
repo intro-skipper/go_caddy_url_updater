@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -87,6 +88,7 @@ type pushEvent struct {
 	Deleted    bool   `json:"deleted"`
 	Repository struct {
 		FullName string `json:"full_name"`
+		HTMLURL  string `json:"html_url"`
 	} `json:"repository"`
 }
 
@@ -198,7 +200,7 @@ func handlePush(ctx context.Context, event pushEvent) error {
 		log.Println("Caddy reloaded successfully.")
 	}
 
-	reportDiscordOutcome(ctx, repoName, newHash, updateErr, reloadErr)
+	reportDiscordOutcome(ctx, repoName, newHash, commitURL(event.Repository.HTMLURL, newHash), updateErr, reloadErr)
 
 	// Both failures have to reach the response: a rewrite that failed while the
 	// reload succeeded would otherwise show up as a successful delivery.
@@ -453,7 +455,7 @@ func httpClientForUnixSocket(sockPath string) *http.Client {
 	return &http.Client{Transport: tr, Timeout: 10 * time.Second}
 }
 
-func reportDiscordOutcome(ctx context.Context, repoName, commitHash string, updateErr, reloadErr error) {
+func reportDiscordOutcome(ctx context.Context, repoName, commitHash, commitLink string, updateErr, reloadErr error) {
 	if discordWebhook == "" {
 		return
 	}
@@ -462,7 +464,7 @@ func reportDiscordOutcome(ctx context.Context, repoName, commitHash string, upda
 
 	embed := discordEmbed{
 		Title:       fmt.Sprintf("Caddy Update • %s", repoName),
-		Description: fmt.Sprintf("Commit `%s` processed.", shortCommit(commitHash)),
+		Description: fmt.Sprintf("Commit %s processed.", formatCommitRef(commitHash, commitLink)),
 		Color:       embedColor(success),
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}
@@ -493,6 +495,50 @@ func shortCommit(hash string) string {
 		return hash[:7]
 	}
 	return hash
+}
+
+// commitURL builds the GitHub commit page from the repository's html_url. It
+// returns "" when the payload carried no usable https URL, so a forged or
+// unexpected value never ends up as a clickable link in Discord. The result is
+// embedded in a Discord masked link, so anything that could terminate the
+// markdown early (parentheses, whitespace, control characters) is rejected too.
+func commitURL(repoHTMLURL, hash string) string {
+	if validateCommitHash(hash) != nil {
+		return ""
+	}
+
+	u, err := url.Parse(strings.TrimRight(repoHTMLURL, "/"))
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return ""
+	}
+	// "?" and "#" are rejected as characters rather than via RawQuery/Fragment:
+	// a bare trailing "?" or "#" parses to empty values but would still turn
+	// the appended /commit/<hash> into a query or fragment.
+	if strings.ContainsFunc(repoHTMLURL, func(r rune) bool {
+		return r <= ' ' || r > '~' || strings.ContainsRune("?#()<>[]\\`", r)
+	}) {
+		return ""
+	}
+
+	return strings.TrimRight(repoHTMLURL, "/") + "/commit/" + hash
+}
+
+// githubRepoURL is the browser URL of the configured GitHub repository, or ""
+// when the owner or name is not configured.
+func githubRepoURL(owner, repo string) string {
+	if owner == "" || repo == "" {
+		return ""
+	}
+	return "https://github.com/" + url.PathEscape(owner) + "/" + url.PathEscape(repo)
+}
+
+// formatCommitRef renders the short hash as a Discord markdown link when a
+// commit URL is known, and as plain inline code otherwise.
+func formatCommitRef(hash, link string) string {
+	if link == "" {
+		return fmt.Sprintf("`%s`", shortCommit(hash))
+	}
+	return fmt.Sprintf("[`%s`](%s)", shortCommit(hash), link)
 }
 
 type discordPayload struct {
@@ -711,17 +757,18 @@ func reportDiscordStartup(ctx context.Context, localHash, remoteHash string, att
 		embed.Description = "Caddyfile synchronized with GitHub head."
 	}
 
+	repoURL := githubRepoURL(githubOwner, githubRepo)
 	if localHash != "" {
 		embed.Fields = append(embed.Fields, discordEmbedField{
 			Name:   "Caddyfile Hash",
-			Value:  fmt.Sprintf("`%s`", shortCommit(localHash)),
+			Value:  formatCommitRef(localHash, commitURL(repoURL, localHash)),
 			Inline: true,
 		})
 	}
 	if remoteHash != "" {
 		embed.Fields = append(embed.Fields, discordEmbedField{
 			Name:   "GitHub Head",
-			Value:  fmt.Sprintf("`%s`", shortCommit(remoteHash)),
+			Value:  formatCommitRef(remoteHash, commitURL(repoURL, remoteHash)),
 			Inline: true,
 		})
 	}
