@@ -140,6 +140,8 @@ func TestCommitURL(t *testing.T) {
 		{"userinfo", "https://user:pw@github.com/intro-skipper/manifest", hash, ""},
 		{"query", "https://github.com/intro-skipper/manifest?x=1", hash, ""},
 		{"fragment", "https://github.com/intro-skipper/manifest#x", hash, ""},
+		{"bare trailing query", "https://github.com/intro-skipper/manifest?", hash, ""},
+		{"bare trailing fragment", "https://github.com/intro-skipper/manifest#", hash, ""},
 		{"closing paren", "https://evil.example/x)", hash, ""},
 		{"markdown break", "https://evil.example/x](https://other", hash, ""},
 		{"whitespace", "https://evil.example/x y", hash, ""},

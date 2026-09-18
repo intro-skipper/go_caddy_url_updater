@@ -508,11 +508,14 @@ func commitURL(repoHTMLURL, hash string) string {
 	}
 
 	u, err := url.Parse(strings.TrimRight(repoHTMLURL, "/"))
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
 		return ""
 	}
+	// "?" and "#" are rejected as characters rather than via RawQuery/Fragment:
+	// a bare trailing "?" or "#" parses to empty values but would still turn
+	// the appended /commit/<hash> into a query or fragment.
 	if strings.ContainsFunc(repoHTMLURL, func(r rune) bool {
-		return r <= ' ' || r > '~' || strings.ContainsRune("()<>[]\\`", r)
+		return r <= ' ' || r > '~' || strings.ContainsRune("?#()<>[]\\`", r)
 	}) {
 		return ""
 	}
