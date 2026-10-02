@@ -608,13 +608,13 @@ func sendDiscordMessage(ctx context.Context, payload discordPayload) error {
 
 	req, err := http.NewRequestWithContext(sendCtx, http.MethodPost, discordWebhook, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create discord request: %w", err)
+		return fmt.Errorf("create discord request: %w", withoutURL(err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("send discord request: %w", err)
+		return fmt.Errorf("send discord request: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 
@@ -624,6 +624,17 @@ func sendDiscordMessage(ctx context.Context, payload discordPayload) error {
 	}
 
 	return nil
+}
+
+// withoutURL redacts the request URL from an error. The Discord webhook URL
+// carries its token in the path, which *url.Error would otherwise print into
+// the logs. The *url.Error itself is kept so Timeout() and unwrapping still work.
+func withoutURL(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return &url.Error{Op: urlErr.Op, URL: "[redacted]", Err: urlErr.Err}
+	}
+	return err
 }
 
 func checkCommitUpToDate(ctx context.Context) {

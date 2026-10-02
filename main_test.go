@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -181,5 +184,32 @@ func TestGithubRepoURL(t *testing.T) {
 	}
 	if got, want := githubRepoURL("a/b", "c d"), "https://github.com/a%2Fb/c%20d"; got != want {
 		t.Fatalf("githubRepoURL escaping = %q, want %q", got, want)
+	}
+}
+
+// TestDiscordErrorsHideToken keeps the webhook token, which sits in the URL
+// path, out of logged errors.
+func TestDiscordErrorsHideToken(t *testing.T) {
+	const token = "SECRET-TOKEN"
+	defer func(orig string) { discordWebhook = orig }(discordWebhook)
+
+	for name, webhook := range map[string]string{
+		"unreachable": "http://127.0.0.1:1/api/webhooks/1/" + token,
+		"malformed":   "http://[::1/api/webhooks/1/" + token,
+	} {
+		t.Run(name, func(t *testing.T) {
+			discordWebhook = webhook
+			err := sendDiscordMessage(context.Background(), discordPayload{})
+			if err == nil {
+				t.Fatal("no error")
+			}
+			if strings.Contains(err.Error(), token) {
+				t.Errorf("error leaks the token: %v", err)
+			}
+			var urlErr *url.Error
+			if !errors.As(err, &urlErr) || urlErr.Err == nil {
+				t.Errorf("error lost its *url.Error cause: %v", err)
+			}
+		})
 	}
 }
